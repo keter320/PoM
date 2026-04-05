@@ -169,9 +169,17 @@ export default function App() {
       <Text style={styles.subtitle}>Привет, {myUsername}!</Text>
       <TextInput style={styles.input} placeholder="Логин собеседника" placeholderTextColor="#888"
         value={chatWith} onChangeText={setChatWith} autoCapitalize="none" />
-      <TouchableOpacity style={styles.button} onPress={() => {
+      <TouchableOpacity style={styles.button} onPress={async () => {
         if (chatWith.trim()) {
           connectWebSocket(token);
+          // Загружаем историю сообщений
+          try {
+            const response = await fetch(`${SERVER_URL}/messages/${myUsername}/${chatWith}`);
+            const history = await response.json();
+            setMessages(history);
+          } catch (e) {
+            console.log('Ошибка загрузки истории', e);
+          }
           setScreen('chat');
         }
       }}>
