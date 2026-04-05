@@ -1,0 +1,80 @@
+# Этот файл отвечает за авторизацию
+# Регистрация, вход, проверка токенов
+
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from jose import jwt
+from database import User, SessionLocal
+
+# Секретный ключ для подписи токенов — можешь поменять на любую строку
+SECRET_KEY = "pom_secret_key_2024"
+ALGORITHM = "HS256"
+
+# Инструмент для шифрования паролей
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Роутер — группа маршрутов для авторизации
+router = APIRouter()
+
+# Функция получения сессии базы данных
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Модели данных — что принимаем от пользователя
+class RegisterData(BaseModel):
+    username: str
+    password: str
+    display_name: str
+
+class LoginData(BaseModel):
+    username: str
+    password: str
+
+# Маршрут регистрации — POST /auth/register
+@router.post("/auth/register")
+def register(data: RegisterData, db: Session = Depends(get_db)):
+    # Проверяем что такого юзера ещё нет
+    existing = db.query(User).filter(User.username == data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Логин уже занят")
+
+    # Шифруем пароль перед сохранением
+    hashed_password = pwd_context.hash(data.password)
+
+    # Создаём нового пользователя
+    user = User(
+        username=data.username,
+        password=hashed_password,
+        display_name=data.display_name,
+        status="user"
+    )
+    db.add(user)
+    db.commit()
+
+    return {"message": "Регистрация успешна"}
+
+# Маршрут входа — POST /auth/login
+@router.post("/auth/login")
+def login(data: LoginData, db: Session = Depends(get_db)):
+    # Ищем юзера в базе
+    user = db.query(User).filter(User.username == data.username).first()
+
+    # Проверяем что юзер существует и пароль верный
+    if not user or not pwd_context.verify(data.password, user.password):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
+    # Создаём JWT токен — это как пропуск, телефон будет его отправлять при каждом запросе
+    token = jwt.encode({"sub": user.username}, SECRET_KEY, algorithm=ALGORITHM)
+
+    return {
+        "token": token,
+        "username": user.username,
+        "display_name": user.display_name,
+        "status": user.status
+    }
