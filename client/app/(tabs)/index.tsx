@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, ScrollView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 
 const SERVER_URL = 'http://192.168.1.156:8000';
 const WS_URL = 'ws://192.168.1.156:8000';
@@ -17,6 +18,8 @@ export default function App() {
   const [myUsername, setMyUsername] = useState('');
   const [myDisplayName, setMyDisplayName] = useState('');  // моё имя в чате
   const [newDisplayName, setNewDisplayName] = useState(''); // новое имя (для редактирования)
+  const [myAvatar, setMyAvatar] = useState(null); // ссылка на аватарку
+  const [chatAvatar, setChatAvatar] = useState(null); // аватарка собеседника
 
   // Для чата
   const [chatWith, setChatWith] = useState('');        // с кем чатимся
@@ -33,6 +36,15 @@ export default function App() {
       if (savedToken && savedUsername) {
         setToken(savedToken);
         setMyUsername(savedUsername);
+        // Загружаем профиль с сервера — там актуальные данные
+        try {
+          const response = await fetch(`${SERVER_URL}/profile/${savedUsername}`);
+          const data = await response.json();
+          setMyDisplayName(data.display_name);
+          if (data.avatar) setMyAvatar(`${SERVER_URL}${data.avatar}?t=${Date.now()}`);
+        } catch (e) {
+          console.log('Ошибка загрузки профиля', e);
+        }
         setScreen('chats');
       }
     }
@@ -73,6 +85,12 @@ export default function App() {
         setToken(data.token);
         setMyUsername(data.username);
         setMyDisplayName(data.display_name);
+        // Загружаем аватарку с сервера
+        try {
+          const profResponse = await fetch(`${SERVER_URL}/profile/${data.username}`);
+          const profData = await profResponse.json();
+          if (profData.avatar) setMyAvatar(`${SERVER_URL}${profData.avatar}?t=${Date.now()}`);
+        } catch (e) {}
         connectWebSocket(data.token);
         setScreen('chats');
       } else {
@@ -111,6 +129,50 @@ export default function App() {
     setToken('');
     setMyUsername('');
     setScreen('login');
+  }
+
+  // Выбор и загрузка аватарки
+  async function pickAvatar() {
+    // Запрашиваем разрешение на доступ к галерее
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Ошибка', 'Нужно разрешение на доступ к галерее');
+      return;
+    }
+
+    // Открываем галерею
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,    // можно обрезать
+      aspect: [1, 1],         // квадратная обрезка
+      quality: 0.7,           // качество (0-1)
+    });
+
+    if (result.canceled) return;
+
+    // Отправляем на сервер
+    const uri = result.assets[0].uri;
+    const formData = new FormData();
+    formData.append('file', {
+      uri,
+      name: 'avatar.jpg',
+      type: 'image/jpeg',
+    } as any);
+
+    try {
+      const response = await fetch(`${SERVER_URL}/profile/avatar/${myUsername}`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      if (response.ok) {
+        // Добавляем ?t=время чтобы телефон не кешировал старую картинку
+        setMyAvatar(`${SERVER_URL}${data.avatar}?t=${Date.now()}`);
+        Alert.alert('Готово', 'Аватарка обновлена!');
+      }
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось загрузить аватарку');
+    }
   }
 
   // Отправка сообщения
@@ -173,9 +235,12 @@ export default function App() {
 
       {/* Профиль */}
       <View style={styles.profileCard}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
-        </View>
+        {myAvatar
+          ? <Image source={{ uri: myAvatar }} style={styles.avatar} />
+          : <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
+            </View>
+        }
         <View>
           <Text style={styles.profileName}>{myDisplayName}</Text>
           <Text style={styles.profileUsername}>@{myUsername}</Text>
@@ -199,6 +264,13 @@ export default function App() {
             console.log('Ошибка загрузки истории', e);
           }
           setScreen('chat');
+          // Загружаем аватарку собеседника
+          try {
+            const profResponse = await fetch(`${SERVER_URL}/profile/${chatWith}`);
+            const profData = await profResponse.json();
+            if (profData.avatar) setChatAvatar(`${SERVER_URL}${profData.avatar}?t=${Date.now()}`);
+            else setChatAvatar(null);
+          } catch (e) {}
         }
       }}>
         <Text style={styles.buttonText}>Открыть чат</Text>
@@ -215,9 +287,15 @@ export default function App() {
       <Text style={styles.title}>Профиль</Text>
 
       {/* Большой аватар */}
-      <View style={[styles.avatar, styles.avatarLarge]}>
-        <Text style={[styles.avatarText, styles.avatarTextLarge]}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
-      </View>
+      <TouchableOpacity onPress={pickAvatar}>
+        {myAvatar
+          ? <Image source={{ uri: myAvatar }} style={[styles.avatar, styles.avatarLarge]} />
+          : <View style={[styles.avatar, styles.avatarLarge]}>
+              <Text style={[styles.avatarText, styles.avatarTextLarge]}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
+            </View>
+        }
+        <Text style={styles.link}>Нажми чтобы сменить фото</Text>
+      </TouchableOpacity>
 
       <Text style={styles.profileUsername}>@{myUsername}</Text>
 
@@ -271,8 +349,18 @@ export default function App() {
         keyExtractor={(_, i) => i.toString()}
         onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
         renderItem={({ item }) => (
-          <View style={[styles.message, item.sender === myUsername ? styles.myMessage : styles.theirMessage]}>
-            <Text style={styles.messageText}>{item.content}</Text>
+          <View style={{ flexDirection: item.sender === myUsername ? 'row-reverse' : 'row', alignItems: 'flex-end', marginBottom: 8, gap: 6 }}>
+            {/* Аватарка собеседника рядом с его сообщением */}
+            {item.sender !== myUsername && (
+              chatAvatar
+                ? <Image source={{ uri: chatAvatar }} style={styles.msgAvatar} />
+                : <View style={styles.msgAvatarPlaceholder}>
+                    <Text style={{ color: '#fff', fontSize: 11, fontWeight: 'bold' }}>{item.sender?.[0]?.toUpperCase()}</Text>
+                  </View>
+            )}
+            <View style={[styles.message, item.sender === myUsername ? styles.myMessage : styles.theirMessage]}>
+              <Text style={styles.messageText}>{item.content}</Text>
+            </View>
           </View>
         )}
         style={styles.messageList}
@@ -315,5 +403,6 @@ const styles = StyleSheet.create({
   avatarLarge: { width: 96, height: 96, borderRadius: 48, marginBottom: 12 },
   avatarTextLarge: { fontSize: 40 },
   editButton: { marginLeft: 'auto', backgroundColor: '#2a2a2a', padding: 8, borderRadius: 8 },
-  editButtonText: { color: '#6c63ff', fontSize: 13 },
+  editButtonText: { color: '#6c63ff', fontSize: 13 }, msgAvatar: { width: 28, height: 28, borderRadius: 14 },
+  msgAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
 });

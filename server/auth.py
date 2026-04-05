@@ -102,3 +102,32 @@ def update_profile(data: dict, db: Session = Depends(get_db)):
     user.display_name = display_name
     db.commit()
     return {"message": "Профиль обновлён"}
+
+import os
+import shutil
+from fastapi import UploadFile, File
+
+# Папка для хранения аватарок
+AVATAR_DIR = "avatars"
+os.makedirs(AVATAR_DIR, exist_ok=True)
+
+# Загрузка аватарки
+@router.post("/profile/avatar/{username}")
+async def upload_avatar(username: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Сохраняем файл на диск
+    ext = file.filename.split(".")[-1]  # расширение файла (jpg, png и тд)
+    filename = f"{username}.{ext}"
+    filepath = os.path.join(AVATAR_DIR, filename)
+
+    with open(filepath, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # Сохраняем путь в базу
+    user.avatar = f"/avatars/{filename}"
+    db.commit()
+
+    return {"avatar": user.avatar}
