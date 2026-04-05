@@ -131,3 +131,61 @@ async def upload_avatar(username: str, file: UploadFile = File(...), db: Session
     db.commit()
 
     return {"avatar": user.avatar}
+
+# Получить список всех пользователей (кроме себя)
+@router.get("/users/{username}")
+def get_users(username: str, db: Session = Depends(get_db)):
+    users = db.query(User).filter(User.username != username).all()
+    return [
+        {
+            "username": u.username,
+            "display_name": u.display_name,
+            "status": u.status,
+            "avatar": u.avatar
+        }
+        for u in users
+    ]
+
+from database import Contact
+
+# Получить список контактов пользователя
+@router.get("/contacts/{username}")
+def get_contacts(username: str, db: Session = Depends(get_db)):
+    contacts = db.query(Contact).filter(Contact.owner == username).all()
+    result = []
+    for c in contacts:
+        user = db.query(User).filter(User.username == c.contact).first()
+        if user:
+            result.append({
+                "username": user.username,
+                "display_name": user.display_name,
+                "status": user.status,
+                "avatar": user.avatar
+            })
+    return result
+
+# Добавить контакт — добавляем обоим сразу
+@router.post("/contacts/add")
+def add_contact(data: dict, db: Session = Depends(get_db)):
+    owner = data.get("owner")
+    contact = data.get("contact")
+
+    if owner == contact:
+        raise HTTPException(status_code=400, detail="Нельзя добавить себя")
+
+    user = db.query(User).filter(User.username == contact).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Добавляем owner -> contact если нет
+    existing1 = db.query(Contact).filter(Contact.owner == owner, Contact.contact == contact).first()
+    if not existing1:
+        db.add(Contact(owner=owner, contact=contact))
+
+    # Добавляем contact -> owner если нет (взаимное добавление)
+    existing2 = db.query(Contact).filter(Contact.owner == contact, Contact.contact == owner).first()
+    if not existing2:
+        db.add(Contact(owner=contact, contact=owner))
+
+    db.commit()
+    return {"message": "Контакт добавлен"}

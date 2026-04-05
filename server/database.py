@@ -29,6 +29,14 @@ class User(Base):
     status = Column(String, default="user")             # user / vip / dev
     avatar = Column(String, default=None)  # ссылка на аватарку
 
+# Таблица контактов — кто у кого в списке чатов
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner = Column(String)   # чей список
+    contact = Column(String) # логин добавленного
+
 # Таблица сообщений
 class Message(Base):
     __tablename__ = "messages"

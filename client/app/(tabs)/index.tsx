@@ -1,8 +1,7 @@
 // Главный файл приложения PoM
-// Добавили: сохранение токена, экран чата, WebSocket
 
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, ScrollView } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -16,19 +15,33 @@ export default function App() {
   const [displayName, setDisplayName] = useState('');
   const [token, setToken] = useState('');
   const [myUsername, setMyUsername] = useState('');
-  const [myDisplayName, setMyDisplayName] = useState('');  // моё имя в чате
-  const [newDisplayName, setNewDisplayName] = useState(''); // новое имя (для редактирования)
-  const [myAvatar, setMyAvatar] = useState(null); // ссылка на аватарку
-  const [chatAvatar, setChatAvatar] = useState(null); // аватарка собеседника
+  const [myDisplayName, setMyDisplayName] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [myAvatar, setMyAvatar] = useState(null);
+  const [chatAvatar, setChatAvatar] = useState(null);
+  const [contacts, setContacts] = useState([]);
+  const [addingContact, setAddingContact] = useState(false);
+  const [newContact, setNewContact] = useState('');
 
-  // Для чата
-  const [chatWith, setChatWith] = useState('');        // с кем чатимся
-  const [chatInput, setChatInput] = useState('');      // текст в поле ввода
-  const [messages, setMessages] = useState([]);        // список сообщений
-  const ws = useRef(null);                             // WebSocket соединение
-  const flatListRef = useRef(null);                    // ссылка на список сообщений
+  const [chatWith, setChatWith] = useState('');
+  const [chatInput, setChatInput] = useState('');
+  const [messages, setMessages] = useState([]);
+  const ws = useRef(null);
+  const flatListRef = useRef(null);
 
-  // При запуске проверяем есть ли сохранённый токен
+  // Загружаем контакты с сервера
+  async function loadContacts(forUsername: string) {
+    if (!forUsername) return;
+    try {
+      const response = await fetch(`${SERVER_URL}/contacts/${forUsername}`);
+      const data = await response.json();
+      setContacts(data);
+    } catch (e) {
+      console.log('Ошибка загрузки контактов', e);
+    }
+  }
+
+  // При запуске проверяем сохранённый токен
   useEffect(() => {
     async function checkToken() {
       const savedToken = await AsyncStorage.getItem('token');
@@ -36,36 +49,30 @@ export default function App() {
       if (savedToken && savedUsername) {
         setToken(savedToken);
         setMyUsername(savedUsername);
-        // Загружаем профиль с сервера — там актуальные данные
         try {
           const response = await fetch(`${SERVER_URL}/profile/${savedUsername}`);
           const data = await response.json();
           setMyDisplayName(data.display_name);
           if (data.avatar) setMyAvatar(`${SERVER_URL}${data.avatar}?t=${Date.now()}`);
-        } catch (e) {
-          console.log('Ошибка загрузки профиля', e);
-        }
+        } catch (e) {}
+        await loadContacts(savedUsername);
         setScreen('chats');
       }
     }
     checkToken();
   }, []);
 
-  // Подключаем WebSocket когда входим в чат
-  function connectWebSocket(tok) {
+  // Подключаем WebSocket
+  function connectWebSocket(tok: string, currentUsername: string) {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) return;
     const socket = new WebSocket(`${WS_URL}/ws?token=${tok}`);
-
     socket.onopen = () => console.log('WebSocket подключён');
-
-    // Когда приходит новое сообщение — добавляем в список
-    socket.onmessage = (event) => {
+    socket.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
       setMessages(prev => [...prev, msg]);
     };
-
     socket.onerror = (e) => console.log('WebSocket ошибка', e.message);
     socket.onclose = () => console.log('WebSocket закрыт');
-
     ws.current = socket;
   }
 
@@ -79,19 +86,18 @@ export default function App() {
       });
       const data = await response.json();
       if (response.ok) {
-        // Сохраняем токен на телефоне
         await AsyncStorage.setItem('token', data.token);
         await AsyncStorage.setItem('username', data.username);
         setToken(data.token);
         setMyUsername(data.username);
         setMyDisplayName(data.display_name);
-        // Загружаем аватарку с сервера
         try {
           const profResponse = await fetch(`${SERVER_URL}/profile/${data.username}`);
           const profData = await profResponse.json();
           if (profData.avatar) setMyAvatar(`${SERVER_URL}${profData.avatar}?t=${Date.now()}`);
         } catch (e) {}
-        connectWebSocket(data.token);
+        connectWebSocket(data.token, data.username);
+        await loadContacts(data.username);
         setScreen('chats');
       } else {
         Alert.alert('Ошибка', data.detail);
@@ -126,39 +132,31 @@ export default function App() {
     await AsyncStorage.removeItem('token');
     await AsyncStorage.removeItem('username');
     if (ws.current) ws.current.close();
+    ws.current = null;
     setToken('');
     setMyUsername('');
+    setMyDisplayName('');
+    setContacts([]);
     setScreen('login');
   }
 
-  // Выбор и загрузка аватарки
+  // Выбор аватарки
   async function pickAvatar() {
-    // Запрашиваем разрешение на доступ к галерее
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       Alert.alert('Ошибка', 'Нужно разрешение на доступ к галерее');
       return;
     }
-
-    // Открываем галерею
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,    // можно обрезать
-      aspect: [1, 1],         // квадратная обрезка
-      quality: 0.7,           // качество (0-1)
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
     });
-
     if (result.canceled) return;
-
-    // Отправляем на сервер
     const uri = result.assets[0].uri;
     const formData = new FormData();
-    formData.append('file', {
-      uri,
-      name: 'avatar.jpg',
-      type: 'image/jpeg',
-    } as any);
-
+    formData.append('file', { uri, name: 'avatar.jpg', type: 'image/jpeg' } as any);
     try {
       const response = await fetch(`${SERVER_URL}/profile/avatar/${myUsername}`, {
         method: 'POST',
@@ -166,12 +164,33 @@ export default function App() {
       });
       const data = await response.json();
       if (response.ok) {
-        // Добавляем ?t=время чтобы телефон не кешировал старую картинку
         setMyAvatar(`${SERVER_URL}${data.avatar}?t=${Date.now()}`);
         Alert.alert('Готово', 'Аватарка обновлена!');
       }
     } catch (e) {
       Alert.alert('Ошибка', 'Не удалось загрузить аватарку');
+    }
+  }
+
+  // Добавить контакт по логину — сохраняем на сервере
+  async function addContact() {
+    if (!newContact.trim()) return;
+    try {
+      const response = await fetch(`${SERVER_URL}/contacts/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: myUsername, contact: newContact.trim() })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        await loadContacts(myUsername); // перезагружаем список с сервера
+        setNewContact('');
+        setAddingContact(false);
+      } else {
+        Alert.alert('Ошибка', data.detail);
+      }
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось найти пользователя');
     }
   }
 
@@ -182,10 +201,7 @@ export default function App() {
       Alert.alert('Ошибка', 'Нет соединения с сервером');
       return;
     }
-    ws.current.send(JSON.stringify({
-      receiver: chatWith,
-      content: chatInput
-    }));
+    ws.current.send(JSON.stringify({ receiver: chatWith, content: chatInput }));
     setChatInput('');
   }
 
@@ -228,13 +244,12 @@ export default function App() {
   );
 
   // Экран чатов
-  // Экран чатов
   if (screen === 'chats') return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <View style={styles.container}>
       <Text style={styles.title}>PoM</Text>
 
       {/* Профиль */}
-      <View style={styles.profileCard}>
+      <TouchableOpacity style={styles.profileCard} onPress={() => setScreen('profile')}>
         {myAvatar
           ? <Image source={{ uri: myAvatar }} style={styles.avatar} />
           : <View style={styles.avatar}>
@@ -245,48 +260,79 @@ export default function App() {
           <Text style={styles.profileName}>{myDisplayName}</Text>
           <Text style={styles.profileUsername}>@{myUsername}</Text>
         </View>
-        <TouchableOpacity style={styles.editButton} onPress={() => setScreen('profile')}>
-          <Text style={styles.editButtonText}>Изменить</Text>
+        <Text style={[styles.link, { marginLeft: 'auto' }]}>✎</Text>
+      </TouchableOpacity>
+
+      {/* Список контактов */}
+      <FlatList
+        data={contacts}
+        keyExtractor={(item: any) => item.username}
+        style={{ width: '100%' }}
+        ListEmptyComponent={
+          <Text style={[styles.profileUsername, { textAlign: 'center', marginTop: 32 }]}>
+            Добавь первый чат →
+          </Text>
+        }
+        renderItem={({ item }: any) => (
+          <TouchableOpacity style={styles.userCard} onPress={async () => {
+            setChatWith(item.username);
+            connectWebSocket(token, myUsername);
+            try {
+              const response = await fetch(`${SERVER_URL}/messages/${myUsername}/${item.username}`);
+              const history = await response.json();
+              setMessages(history);
+              if (item.avatar) setChatAvatar(`${SERVER_URL}${item.avatar}?t=${Date.now()}`);
+              else setChatAvatar(null);
+            } catch (e) {}
+            setScreen('chat');
+          }}>
+            {item.avatar
+              ? <Image source={{ uri: `${SERVER_URL}${item.avatar}` }} style={styles.avatar} />
+              : <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>{item.display_name?.[0]?.toUpperCase() || '?'}</Text>
+                </View>
+            }
+            <View>
+              <Text style={styles.profileName}>{item.display_name}</Text>
+              <Text style={styles.profileUsername}>@{item.username}</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+      />
+
+      {/* Поле добавления контакта */}
+      {addingContact && (
+        <View style={{ width: '100%', flexDirection: 'row', gap: 8, marginTop: 8 }}>
+          <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]}
+            placeholder="Логин пользователя" placeholderTextColor="#888"
+            value={newContact} onChangeText={setNewContact} autoCapitalize="none"
+            autoFocus />
+          <TouchableOpacity style={styles.sendButton} onPress={addContact}>
+            <Text style={styles.buttonText}>+</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.sendButton, { backgroundColor: '#2a2a2a' }]}
+            onPress={() => { setAddingContact(false); setNewContact(''); }}>
+            <Text style={styles.buttonText}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Кнопки внизу */}
+      <View style={{ flexDirection: 'row', width: '100%', justifyContent: 'space-between', marginTop: 16 }}>
+        <TouchableOpacity onPress={logout}>
+          <Text style={styles.link}>Выйти</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => setAddingContact(true)}>
+          <Text style={styles.link}>+ Новый чат</Text>
         </TouchableOpacity>
       </View>
-
-      {/* Открыть чат */}
-      <TextInput style={styles.input} placeholder="Логин собеседника" placeholderTextColor="#888"
-        value={chatWith} onChangeText={setChatWith} autoCapitalize="none" />
-      <TouchableOpacity style={styles.button} onPress={async () => {
-        if (chatWith.trim()) {
-          connectWebSocket(token);
-          try {
-            const response = await fetch(`${SERVER_URL}/messages/${myUsername}/${chatWith}`);
-            const history = await response.json();
-            setMessages(history);
-          } catch (e) {
-            console.log('Ошибка загрузки истории', e);
-          }
-          setScreen('chat');
-          // Загружаем аватарку собеседника
-          try {
-            const profResponse = await fetch(`${SERVER_URL}/profile/${chatWith}`);
-            const profData = await profResponse.json();
-            if (profData.avatar) setChatAvatar(`${SERVER_URL}${profData.avatar}?t=${Date.now()}`);
-            else setChatAvatar(null);
-          } catch (e) {}
-        }
-      }}>
-        <Text style={styles.buttonText}>Открыть чат</Text>
-      </TouchableOpacity>
-      <TouchableOpacity onPress={logout}>
-        <Text style={styles.link}>Выйти</Text>
-      </TouchableOpacity>
-    </ScrollView>
+    </View>
   );
 
   // Экран профиля
   if (screen === 'profile') return (
     <View style={styles.container}>
       <Text style={styles.title}>Профиль</Text>
-
-      {/* Большой аватар */}
       <TouchableOpacity onPress={pickAvatar}>
         {myAvatar
           ? <Image source={{ uri: myAvatar }} style={[styles.avatar, styles.avatarLarge]} />
@@ -296,12 +342,9 @@ export default function App() {
         }
         <Text style={styles.link}>Нажми чтобы сменить фото</Text>
       </TouchableOpacity>
-
       <Text style={styles.profileUsername}>@{myUsername}</Text>
-
       <TextInput style={styles.input} placeholder="Новое имя" placeholderTextColor="#888"
         value={newDisplayName} onChangeText={setNewDisplayName} />
-
       <TouchableOpacity style={styles.button} onPress={async () => {
         if (!newDisplayName.trim()) return;
         try {
@@ -312,7 +355,6 @@ export default function App() {
           });
           if (response.ok) {
             setMyDisplayName(newDisplayName);
-            await AsyncStorage.setItem('display_name', newDisplayName);
             Alert.alert('Готово', 'Имя обновлено!');
             setScreen('chats');
           }
@@ -322,7 +364,6 @@ export default function App() {
       }}>
         <Text style={styles.buttonText}>Сохранить</Text>
       </TouchableOpacity>
-
       <TouchableOpacity onPress={() => setScreen('chats')}>
         <Text style={styles.link}>← Назад</Text>
       </TouchableOpacity>
@@ -338,19 +379,16 @@ export default function App() {
         </TouchableOpacity>
         <Text style={styles.chatTitle}>{chatWith}</Text>
       </View>
-
-      {/* Список сообщений */}
       <FlatList
         ref={flatListRef}
-        data={messages.filter(m =>
+        data={messages.filter((m: any) =>
           (m.sender === myUsername && m.receiver === chatWith) ||
           (m.sender === chatWith && m.receiver === myUsername)
         )}
-        keyExtractor={(_, i) => i.toString()}
+        keyExtractor={(_: any, i: number) => i.toString()}
         onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
-        renderItem={({ item }) => (
+        renderItem={({ item }: any) => (
           <View style={{ flexDirection: item.sender === myUsername ? 'row-reverse' : 'row', alignItems: 'flex-end', marginBottom: 8, gap: 6 }}>
-            {/* Аватарка собеседника рядом с его сообщением */}
             {item.sender !== myUsername && (
               chatAvatar
                 ? <Image source={{ uri: chatAvatar }} style={styles.msgAvatar} />
@@ -365,8 +403,6 @@ export default function App() {
         )}
         style={styles.messageList}
       />
-
-      {/* Поле ввода */}
       <View style={styles.inputRow}>
         <TextInput style={styles.chatInput} placeholder="Сообщение..." placeholderTextColor="#888"
           value={chatInput} onChangeText={setChatInput} />
@@ -395,7 +431,8 @@ const styles = StyleSheet.create({
   messageText: { color: '#fff', fontSize: 15 },
   inputRow: { flexDirection: 'row', width: '100%', gap: 8, paddingBottom: 16 },
   chatInput: { flex: 1, backgroundColor: '#1a1a1a', color: '#fff', padding: 14, borderRadius: 12, fontSize: 16 },
-  sendButton: { backgroundColor: '#6c63ff', padding: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, profileCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 16, borderRadius: 16, marginBottom: 24 },
+  sendButton: { backgroundColor: '#6c63ff', padding: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  profileCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 16, borderRadius: 16, marginBottom: 24 },
   profileName: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
   profileUsername: { color: '#888', fontSize: 13 },
   avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
@@ -403,6 +440,8 @@ const styles = StyleSheet.create({
   avatarLarge: { width: 96, height: 96, borderRadius: 48, marginBottom: 12 },
   avatarTextLarge: { fontSize: 40 },
   editButton: { marginLeft: 'auto', backgroundColor: '#2a2a2a', padding: 8, borderRadius: 8 },
-  editButtonText: { color: '#6c63ff', fontSize: 13 }, msgAvatar: { width: 28, height: 28, borderRadius: 14 },
+  editButtonText: { color: '#6c63ff', fontSize: 13 },
+  msgAvatar: { width: 28, height: 28, borderRadius: 14 },
   msgAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
+  userCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 14, borderRadius: 14, marginBottom: 8 },
 });
