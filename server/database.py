@@ -27,6 +27,7 @@ class User(Base):
     password = Column(String)                            # пароль (зашифрованный)
     display_name = Column(String)                        # имя в чате
     status = Column(String, default="user")             # user / vip / dev
+    avatar = Column(String, default=None)  # ссылка на аватарку
 
 # Таблица сообщений
 class Message(Base):

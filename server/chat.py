@@ -83,5 +83,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await send_to_user(username, packet)
 
     except WebSocketDisconnect:
-        del active_connections[username]
+        if username in active_connections:
+            del active_connections[username]
         print(f"{username} отключился")

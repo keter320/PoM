@@ -78,3 +78,27 @@ def login(data: LoginData, db: Session = Depends(get_db)):
         "display_name": user.display_name,
         "status": user.status
     }
+# Получить профиль пользователя
+@router.get("/profile/{username}")
+def get_profile(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {
+        "username": user.username,
+        "display_name": user.display_name,
+        "status": user.status,
+        "avatar": user.avatar if hasattr(user, 'avatar') else None
+    }
+
+# Обновить имя профиля
+@router.post("/profile/update")
+def update_profile(data: dict, db: Session = Depends(get_db)):
+    username = data.get("username")
+    display_name = data.get("display_name")
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    user.display_name = display_name
+    db.commit()
+    return {"message": "Профиль обновлён"}

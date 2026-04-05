@@ -2,7 +2,7 @@
 // Добавили: сохранение токена, экран чата, WebSocket
 
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, ScrollView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SERVER_URL = 'http://192.168.1.156:8000';
@@ -15,6 +15,8 @@ export default function App() {
   const [displayName, setDisplayName] = useState('');
   const [token, setToken] = useState('');
   const [myUsername, setMyUsername] = useState('');
+  const [myDisplayName, setMyDisplayName] = useState('');  // моё имя в чате
+  const [newDisplayName, setNewDisplayName] = useState(''); // новое имя (для редактирования)
 
   // Для чата
   const [chatWith, setChatWith] = useState('');        // с кем чатимся
@@ -70,6 +72,7 @@ export default function App() {
         await AsyncStorage.setItem('username', data.username);
         setToken(data.token);
         setMyUsername(data.username);
+        setMyDisplayName(data.display_name);
         connectWebSocket(data.token);
         setScreen('chats');
       } else {
@@ -163,16 +166,31 @@ export default function App() {
   );
 
   // Экран чатов
+  // Экран чатов
   if (screen === 'chats') return (
-    <View style={styles.container}>
+    <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>PoM</Text>
-      <Text style={styles.subtitle}>Привет, {myUsername}!</Text>
+
+      {/* Профиль */}
+      <View style={styles.profileCard}>
+        <View style={styles.avatar}>
+          <Text style={styles.avatarText}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
+        </View>
+        <View>
+          <Text style={styles.profileName}>{myDisplayName}</Text>
+          <Text style={styles.profileUsername}>@{myUsername}</Text>
+        </View>
+        <TouchableOpacity style={styles.editButton} onPress={() => setScreen('profile')}>
+          <Text style={styles.editButtonText}>Изменить</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Открыть чат */}
       <TextInput style={styles.input} placeholder="Логин собеседника" placeholderTextColor="#888"
         value={chatWith} onChangeText={setChatWith} autoCapitalize="none" />
       <TouchableOpacity style={styles.button} onPress={async () => {
         if (chatWith.trim()) {
           connectWebSocket(token);
-          // Загружаем историю сообщений
           try {
             const response = await fetch(`${SERVER_URL}/messages/${myUsername}/${chatWith}`);
             const history = await response.json();
@@ -187,6 +205,48 @@ export default function App() {
       </TouchableOpacity>
       <TouchableOpacity onPress={logout}>
         <Text style={styles.link}>Выйти</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+
+  // Экран профиля
+  if (screen === 'profile') return (
+    <View style={styles.container}>
+      <Text style={styles.title}>Профиль</Text>
+
+      {/* Большой аватар */}
+      <View style={[styles.avatar, styles.avatarLarge]}>
+        <Text style={[styles.avatarText, styles.avatarTextLarge]}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
+      </View>
+
+      <Text style={styles.profileUsername}>@{myUsername}</Text>
+
+      <TextInput style={styles.input} placeholder="Новое имя" placeholderTextColor="#888"
+        value={newDisplayName} onChangeText={setNewDisplayName} />
+
+      <TouchableOpacity style={styles.button} onPress={async () => {
+        if (!newDisplayName.trim()) return;
+        try {
+          const response = await fetch(`${SERVER_URL}/profile/update`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: myUsername, display_name: newDisplayName })
+          });
+          if (response.ok) {
+            setMyDisplayName(newDisplayName);
+            await AsyncStorage.setItem('display_name', newDisplayName);
+            Alert.alert('Готово', 'Имя обновлено!');
+            setScreen('chats');
+          }
+        } catch (e) {
+          Alert.alert('Ошибка', 'Не удалось обновить профиль');
+        }
+      }}>
+        <Text style={styles.buttonText}>Сохранить</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity onPress={() => setScreen('chats')}>
+        <Text style={styles.link}>← Назад</Text>
       </TouchableOpacity>
     </View>
   );
@@ -247,5 +307,13 @@ const styles = StyleSheet.create({
   messageText: { color: '#fff', fontSize: 15 },
   inputRow: { flexDirection: 'row', width: '100%', gap: 8, paddingBottom: 16 },
   chatInput: { flex: 1, backgroundColor: '#1a1a1a', color: '#fff', padding: 14, borderRadius: 12, fontSize: 16 },
-  sendButton: { backgroundColor: '#6c63ff', padding: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  sendButton: { backgroundColor: '#6c63ff', padding: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, profileCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 16, borderRadius: 16, marginBottom: 24 },
+  profileName: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  profileUsername: { color: '#888', fontSize: 13 },
+  avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
+  avatarText: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
+  avatarLarge: { width: 96, height: 96, borderRadius: 48, marginBottom: 12 },
+  avatarTextLarge: { fontSize: 40 },
+  editButton: { marginLeft: 'auto', backgroundColor: '#2a2a2a', padding: 8, borderRadius: 8 },
+  editButtonText: { color: '#6c63ff', fontSize: 13 },
 });
