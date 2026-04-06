@@ -1,20 +1,104 @@
 // Главный файл приложения PoM
 
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, BackHandler } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, BackHandler, Dimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
-
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { useSharedValue, useAnimatedStyle, withSpring, withTiming, runOnJS } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, withSpring, runOnJS } from 'react-native-reanimated';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 const SERVER_URL = 'http://192.168.1.156:8000';
 const WS_URL = 'ws://192.168.1.156:8000';
+const SCREEN_WIDTH = Dimensions.get('window').width;
 
-// Компонент просмотра одного фото с зумом и свайпом для закрытия
-function ImageViewer({ url, onClose }: { url: string, onClose: () => void }) {
+// Определяем тип медиа
+function getMediaType(url: string): 'video' | 'image' {
+  const ext = url.split('.').pop()?.toLowerCase() || '';
+  return ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext) ? 'video' : 'image';
+}
+
+// Форматирование времени видео
+function formatTime(sec: number) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// Превью видео в чате — показывает первый кадр + иконку + время
+function VideoPreview({ url, onPress }: { url: string, onPress: () => void }) {
+  const [duration, setDuration] = useState(0);
+  const player = useVideoPlayer(url, p => { p.pause(); });
+
+  useEffect(() => {
+    const sub = player.addListener('timeUpdate', (e) => {
+      if (e.duration && e.duration > 0) setDuration(e.duration);
+    });
+    return () => {
+      sub.remove();
+      try { player.pause(); } catch (e) {}
+    };
+  }, [player]);
+
+  return (
+    <TouchableOpacity onPress={onPress} style={{ width: 200, height: 150, borderRadius: 8, overflow: 'hidden', backgroundColor: '#000' }}>
+      <VideoView player={player} style={{ width: 200, height: 150 }} contentFit="cover" nativeControls={false} />
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.25)' }} />
+      <View style={{ position: 'absolute', top: 8, right: 8, flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 }}>
+        <Text style={{ color: '#fff', fontSize: 10 }}>▶</Text>
+        <Text style={{ color: '#fff', fontSize: 11 }}>{duration > 0 ? formatTime(duration) : '...'}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// Плеер видео на весь экран просмотрщика
+function VideoPlayer({ url }: { url: string }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const player = useVideoPlayer(url, p => { p.loop = false; p.pause(); });
+
+  useEffect(() => {
+    const sub1 = player.addListener('playingChange', (e) => {
+      setIsPlaying(e.isPlaying);
+    });
+    const sub2 = player.addListener('timeUpdate', (e) => {
+      setPosition(e.currentTime ?? 0);
+      if (e.duration && e.duration > 0) setDuration(e.duration);
+    });
+    // Останавливаем при размонтировании компонента
+    return () => {
+      sub1.remove();
+      sub2.remove();
+      try { player.pause(); } catch (e) {}
+    };
+  }, [player]);
+
+  return (
+    <View style={{ width: SCREEN_WIDTH, alignItems: 'center', justifyContent: 'center' }}>
+      <VideoView player={player} style={{ width: SCREEN_WIDTH, height: 300 }} contentFit="contain" nativeControls={false} />
+      <View style={{ width: '85%', marginTop: 16 }}>
+        <TouchableOpacity onPress={() => isPlaying ? player.pause() : player.play()}
+          style={{ alignSelf: 'center', width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(108,99,255,0.8)', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+          <Text style={{ color: '#fff', fontSize: 24 }}>{isPlaying ? '⏸' : '▶'}</Text>
+        </TouchableOpacity>
+        <View style={{ height: 4, backgroundColor: 'rgba(255,255,255,0.3)', borderRadius: 2 }}>
+          <View style={{ height: 4, backgroundColor: '#6c63ff', borderRadius: 2, width: duration > 0 ? `${Math.min((position / duration) * 100, 100)}%` : '0%' }} />
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+          <Text style={{ color: '#fff', fontSize: 12 }}>{formatTime(position)}</Text>
+          <Text style={{ color: '#fff', fontSize: 12 }}>{duration > 0 ? formatTime(duration) : '--:--'}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// Просмотрщик фото с зумом
+function ImageViewer({ url }: { url: string }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const translateX = useSharedValue(0);
@@ -23,7 +107,6 @@ function ImageViewer({ url, onClose }: { url: string, onClose: () => void }) {
   const savedY = useSharedValue(0);
   const [detailMode, setDetailMode] = useState(false);
 
-  // Двойной тап — переключение режимов
   const doubleTapGesture = Gesture.Tap()
     .numberOfTaps(2)
     .maxDuration(150)
@@ -43,16 +126,10 @@ function ImageViewer({ url, onClose }: { url: string, onClose: () => void }) {
       }
     });
 
-  // Пинч — только в детальном режиме
   const pinchGesture = Gesture.Pinch()
-    .onUpdate((e) => {
-      scale.value = Math.max(1, Math.min(savedScale.value * e.scale, 5));
-    })
-    .onEnd(() => {
-      savedScale.value = scale.value;
-    });
+    .onUpdate((e) => { scale.value = Math.max(1, Math.min(savedScale.value * e.scale, 5)); })
+    .onEnd(() => { savedScale.value = scale.value; });
 
-  // Перемещение в детальном режиме — свободное по X и Y
   const panDetailGesture = Gesture.Pan()
     .onUpdate((e) => {
       translateX.value = savedX.value + e.translationX;
@@ -63,30 +140,34 @@ function ImageViewer({ url, onClose }: { url: string, onClose: () => void }) {
       savedY.value = translateY.value;
     });
 
-  // Жест для режима листания — отдаём горизонталь FlatList
   const panListGesture = Gesture.Pan()
     .activeOffsetX([-30, 30])
     .failOffsetY([-20, 20])
-    .onUpdate(() => {})
-    .onEnd(() => {});
+    .onUpdate(() => {}).onEnd(() => {});
 
   const detailComposed = Gesture.Simultaneous(pinchGesture, panDetailGesture, doubleTapGesture);
   const listComposed = Gesture.Simultaneous(panListGesture, doubleTapGesture);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { scale: scale.value },
-      { translateX: translateX.value },
-      { translateY: translateY.value },
-    ]
+    transform: [{ scale: scale.value }, { translateX: translateX.value }, { translateY: translateY.value }]
   }));
 
   return (
     <GestureDetector gesture={detailMode ? detailComposed : listComposed}>
-      <Animated.View style={[{ width: 400, height: 600, alignItems: 'center', justifyContent: 'center' }, animatedStyle]}>
-        <Image source={{ uri: url }} style={{ width: 400, height: 300 }} resizeMode="contain" />
+      <Animated.View style={[{ width: SCREEN_WIDTH, height: 600, alignItems: 'center', justifyContent: 'center' }, animatedStyle]}>
+        <Image source={{ uri: url }} style={{ width: SCREEN_WIDTH, height: 400 }} resizeMode="contain" />
       </Animated.View>
     </GestureDetector>
+  );
+}
+
+// Один слайд в просмотрщике — фото или видео
+function MediaSlide({ url }: { url: string }) {
+  const isVideo = getMediaType(url) === 'video';
+  return (
+    <View style={{ width: SCREEN_WIDTH, height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+      {isVideo ? <VideoPlayer url={url} /> : <ImageViewer url={url} />}
+    </View>
   );
 }
 
@@ -101,32 +182,27 @@ export default function App() {
   const [newDisplayName, setNewDisplayName] = useState('');
   const [myAvatar, setMyAvatar] = useState(null);
   const [chatAvatar, setChatAvatar] = useState(null);
-  const [viewingImage, setViewingImage] = useState(null);
+  const [viewingMedia, setViewingMedia] = useState(null);
   const [viewingIndex, setViewingIndex] = useState(0);
-  const [allChatImages, setAllChatImages] = useState([]);
+  const [allChatMedia, setAllChatMedia] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [addingContact, setAddingContact] = useState(false);
   const [newContact, setNewContact] = useState('');
-
   const [chatWith, setChatWith] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState([]);
   const ws = useRef(null);
   const flatListRef = useRef(null);
 
-  // Загружаем контакты с сервера
   async function loadContacts(forUsername: string) {
     if (!forUsername) return;
     try {
       const response = await fetch(`${SERVER_URL}/contacts/${forUsername}`);
       const data = await response.json();
       setContacts(data);
-    } catch (e) {
-      console.log('Ошибка загрузки контактов', e);
-    }
+    } catch (e) {}
   }
 
-  // При запуске проверяем сохранённый токен
   useEffect(() => {
     async function checkToken() {
       const savedToken = await AsyncStorage.getItem('token');
@@ -147,18 +223,16 @@ export default function App() {
     checkToken();
   }, []);
 
-  // Кнопка возврата на Android
   useEffect(() => {
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (viewingImage) { setViewingImage(null); return true; }
+      if (viewingMedia) { setViewingMedia(null); return true; }
       if (screen === 'chat') { setScreen('chats'); return true; }
       if (screen === 'profile') { setScreen('chats'); return true; }
       return false;
     });
     return () => handler.remove();
-  }, [viewingImage, screen]);
+  }, [viewingMedia, screen]);
 
-  // Подключаем WebSocket
   function connectWebSocket(tok: string, currentUsername: string) {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) return;
     const socket = new WebSocket(`${WS_URL}/ws?token=${tok}`);
@@ -172,7 +246,6 @@ export default function App() {
     ws.current = socket;
   }
 
-  // Вход
   async function login() {
     try {
       const response = await fetch(`${SERVER_URL}/auth/login`, {
@@ -203,7 +276,6 @@ export default function App() {
     }
   }
 
-  // Регистрация
   async function register() {
     try {
       const response = await fetch(`${SERVER_URL}/auth/register`, {
@@ -223,7 +295,6 @@ export default function App() {
     }
   }
 
-  // Выход
   async function logout() {
     await AsyncStorage.removeItem('token');
     await AsyncStorage.removeItem('username');
@@ -236,39 +307,27 @@ export default function App() {
     setScreen('login');
   }
 
-  // Выбор аватарки
   async function pickAvatar() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Ошибка', 'Нужно разрешение на доступ к галерее');
-      return;
-    }
+    if (!permission.granted) { Alert.alert('Ошибка', 'Нужно разрешение'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.7,
+      allowsEditing: true, aspect: [1, 1], quality: 0.7,
     });
     if (result.canceled) return;
     const uri = result.assets[0].uri;
     const formData = new FormData();
     formData.append('file', { uri, name: 'avatar.jpg', type: 'image/jpeg' } as any);
     try {
-      const response = await fetch(`${SERVER_URL}/profile/avatar/${myUsername}`, {
-        method: 'POST',
-        body: formData,
-      });
+      const response = await fetch(`${SERVER_URL}/profile/avatar/${myUsername}`, { method: 'POST', body: formData });
       const data = await response.json();
       if (response.ok) {
         setMyAvatar(`${SERVER_URL}${data.avatar}?t=${Date.now()}`);
         Alert.alert('Готово', 'Аватарка обновлена!');
       }
-    } catch (e) {
-      Alert.alert('Ошибка', 'Не удалось загрузить аватарку');
-    }
+    } catch (e) {}
   }
 
-  // Добавить контакт
   async function addContact() {
     if (!newContact.trim()) return;
     try {
@@ -285,31 +344,25 @@ export default function App() {
       } else {
         Alert.alert('Ошибка', data.detail);
       }
-    } catch (e) {
-      Alert.alert('Ошибка', 'Не удалось найти пользователя');
-    }
+    } catch (e) {}
   }
 
-  // Отправка сообщения
   function sendMessage() {
     if (!chatInput.trim() || !chatWith.trim()) return;
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-      Alert.alert('Ошибка', 'Нет соединения с сервером');
+      Alert.alert('Ошибка', 'Нет соединения');
       return;
     }
     ws.current.send(JSON.stringify({ receiver: chatWith, content: chatInput }));
     setChatInput('');
   }
 
-  // Выбор и отправка картинок
-  async function sendImage() {
+  // Отправка медиа — фото и видео одной кнопкой
+  async function sendMedia(type: 'images' | 'videos') {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Ошибка', 'Нужно разрешение на доступ к галерее');
-      return;
-    }
+    if (!permission.granted) { Alert.alert('Ошибка', 'Нужно разрешение'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: type === 'videos' ? ImagePicker.MediaTypeOptions.Videos : ImagePicker.MediaTypeOptions.Images,
       allowsMultipleSelection: true,
       quality: 0.8,
     });
@@ -317,10 +370,15 @@ export default function App() {
 
     const urls: string[] = [];
     for (const asset of result.assets) {
+      const isVideo = asset.type === 'video';
+      const ext = asset.uri.split('.').pop() || (isVideo ? 'mp4' : 'jpg');
+      const name = isVideo ? `video.${ext}` : `image.${ext}`;
+      const type = isVideo ? `video/${ext}` : `image/${ext}`;
+      const endpoint = isVideo ? '/upload/video' : '/upload/image';
       const formData = new FormData();
-      formData.append('file', { uri: asset.uri, name: 'image.jpg', type: 'image/jpeg' } as any);
+      formData.append('file', { uri: asset.uri, name, type } as any);
       try {
-        const response = await fetch(`${SERVER_URL}/upload/image`, { method: 'POST', body: formData });
+        const response = await fetch(`${SERVER_URL}${endpoint}`, { method: 'POST', body: formData });
         const data = await response.json();
         if (response.ok) urls.push(`${SERVER_URL}${data.url}`);
       } catch (e) {}
@@ -329,38 +387,29 @@ export default function App() {
     if (urls.length > 0) {
       ws.current.send(JSON.stringify({
         receiver: chatWith,
-        content: `[images]${urls.join('|')}`
+        content: `[media]${urls.join('|')}`
       }));
     }
   }
 
-  // Сохранить картинку в галерею
-  async function saveImage(url: string) {
-    try {
-      const permission = await MediaLibrary.requestPermissionsAsync();
-      if (!permission.granted) { Alert.alert('Ошибка', 'Нужно разрешение на сохранение'); return; }
-      const filename = `pom_${Date.now()}.jpg`;
-      const localUri = FileSystem.cacheDirectory + filename;
-      const download = await FileSystem.downloadAsync(url, localUri);
-      const asset = await MediaLibrary.createAssetAsync(download.uri);
-      await MediaLibrary.createAlbumAsync('PoM', asset, false);
-      Alert.alert('Готово', 'Фото сохранено в галерею!');
-    } catch (e) {
-      Alert.alert('Ошибка', String(e));
-    }
-  }
-
-  // Собрать все фото из чата для просмотрщика
-  function openImageViewer(url: string, msgs: any[]) {
-    const allImgs = msgs
-      .filter((m: any) => m.content?.startsWith('[images]') || m.content?.startsWith('[image]'))
-      .flatMap((m: any) => m.content.startsWith('[images]')
-        ? m.content.replace('[images]', '').split('|')
-        : [m.content.replace('[image]', '')]
-      );
-    setAllChatImages(allImgs);
-    setViewingIndex(allImgs.indexOf(url));
-    setViewingImage(url);
+  // Открыть просмотрщик медиа
+  function openMediaViewer(url: string, msgs: any[]) {
+    const allMedia = msgs
+      .filter((m: any) =>
+        m.content?.startsWith('[media]') ||
+        m.content?.startsWith('[images]') ||
+        m.content?.startsWith('[image]') ||
+        m.content?.startsWith('[videos]')
+      )
+      .flatMap((m: any) => {
+        if (m.content.startsWith('[media]')) return m.content.replace('[media]', '').split('|');
+        if (m.content.startsWith('[images]')) return m.content.replace('[images]', '').split('|');
+        if (m.content.startsWith('[videos]')) return m.content.replace('[videos]', '').split('|');
+        return [m.content.replace('[image]', '')];
+      });
+    setAllChatMedia(allMedia);
+    setViewingIndex(Math.max(0, allMedia.indexOf(url)));
+    setViewingMedia(url);
   }
 
   // Экран входа
@@ -381,7 +430,6 @@ export default function App() {
     </View>
   );
 
-  // Экран регистрации
   if (screen === 'register') return (
     <View style={styles.container}>
       <Text style={styles.title}>PoM</Text>
@@ -401,7 +449,6 @@ export default function App() {
     </View>
   );
 
-  // Экран чатов
   if (screen === 'chats') return (
     <View style={styles.container}>
       <Text style={styles.title}>PoM</Text>
@@ -471,7 +518,6 @@ export default function App() {
     </View>
   );
 
-  // Экран профиля
   if (screen === 'profile') return (
     <View style={styles.container}>
       <Text style={styles.title}>Профиль</Text>
@@ -500,9 +546,7 @@ export default function App() {
             Alert.alert('Готово', 'Имя обновлено!');
             setScreen('chats');
           }
-        } catch (e) {
-          Alert.alert('Ошибка', 'Не удалось обновить профиль');
-        }
+        } catch (e) {}
       }}>
         <Text style={styles.buttonText}>Сохранить</Text>
       </TouchableOpacity>
@@ -512,7 +556,6 @@ export default function App() {
     </View>
   );
 
-  // Экран чата
   if (screen === 'chat') return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.chatHeader}>
@@ -540,25 +583,55 @@ export default function App() {
                   </View>
             )}
             <View style={[styles.message, item.sender === myUsername ? styles.myMessage : styles.theirMessage]}>
-              {item.content?.startsWith('[images]') ? (
+              {/* Новый формат [media] */}
+              {item.content?.startsWith('[media]') ? (
+                (() => {
+                  const urls = item.content.replace('[media]', '').split('|');
+                  return (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, maxWidth: 220 }}>
+                      {urls.map((url: string, i: number) => (
+                        getMediaType(url) === 'video'
+                          ? <VideoPreview key={i} url={url} onPress={() => openMediaViewer(url, messages)} />
+                          : <TouchableOpacity key={i} onPress={() => openMediaViewer(url, messages)}>
+                              <Image source={{ uri: url }}
+                                style={{ width: urls.length === 1 ? 200 : 106, height: urls.length === 1 ? 150 : 106, borderRadius: 8 }}
+                                resizeMode="cover" />
+                            </TouchableOpacity>
+                      ))}
+                    </View>
+                  );
+                })()
+              ) : item.content?.startsWith('[images]') ? (
+                // Старый формат для совместимости
                 (() => {
                   const urls = item.content.replace('[images]', '').split('|');
                   return (
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, maxWidth: 220 }}>
                       {urls.map((url: string, i: number) => (
-                        <TouchableOpacity key={i} onPress={() => openImageViewer(url, messages)}>
+                        <TouchableOpacity key={i} onPress={() => openMediaViewer(url, messages)}>
                           <Image source={{ uri: url }}
-                            style={{ width: urls.length === 1 ? 200 : 106, height: urls.length === 1 ? 200 : 106, borderRadius: 8 }}
+                            style={{ width: urls.length === 1 ? 200 : 106, height: urls.length === 1 ? 150 : 106, borderRadius: 8 }}
                             resizeMode="cover" />
                         </TouchableOpacity>
                       ))}
                     </View>
                   );
                 })()
+              ) : item.content?.startsWith('[videos]') ? (
+                (() => {
+                  const urls = item.content.replace('[videos]', '').split('|');
+                  return (
+                    <View style={{ gap: 4 }}>
+                      {urls.map((url: string, i: number) => (
+                        <VideoPreview key={i} url={url} onPress={() => openMediaViewer(url, messages)} />
+                      ))}
+                    </View>
+                  );
+                })()
               ) : item.content?.startsWith('[image]') ? (
-                <TouchableOpacity onPress={() => openImageViewer(item.content.replace('[image]', ''), messages)}>
+                <TouchableOpacity onPress={() => openMediaViewer(item.content.replace('[image]', ''), messages)}>
                   <Image source={{ uri: item.content.replace('[image]', '') }}
-                    style={{ width: 200, height: 200, borderRadius: 8 }} resizeMode="cover" />
+                    style={{ width: 200, height: 150, borderRadius: 8 }} resizeMode="cover" />
                 </TouchableOpacity>
               ) : (
                 <Text style={styles.messageText}>{item.content}</Text>
@@ -570,8 +643,11 @@ export default function App() {
       />
 
       <View style={styles.inputRow}>
-        <TouchableOpacity style={[styles.sendButton, { backgroundColor: '#2a2a2a' }]} onPress={sendImage}>
+        <TouchableOpacity style={[styles.sendButton, { backgroundColor: '#2a2a2a' }]} onPress={() => sendMedia('images')}>
           <Text style={styles.buttonText}>🖼</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.sendButton, { backgroundColor: '#2a2a2a' }]} onPress={() => sendMedia('videos')}>
+          <Text style={styles.buttonText}>🎥</Text>
         </TouchableOpacity>
         <TextInput style={styles.chatInput} placeholder="Сообщение..." placeholderTextColor="#888"
           value={chatInput} onChangeText={setChatInput} />
@@ -580,30 +656,30 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
-      {/* Просмотрщик фото */}
-      {viewingImage && (
-        <View style={styles.imageViewer}>
+      {/* Просмотрщик медиа */}
+      {viewingMedia && (
+        <View style={styles.mediaViewer}>
           <FlatList
-            data={allChatImages}
+            data={allChatMedia}
             horizontal
             pagingEnabled
             initialScrollIndex={viewingIndex}
-            getItemLayout={(_, index) => ({ length: 400, offset: 400 * index, index })}
+            getItemLayout={(_, index) => ({ length: SCREEN_WIDTH, offset: SCREEN_WIDTH * index, index })}
             keyExtractor={(_, i) => i.toString()}
             onMomentumScrollEnd={(e) => {
-              const index = Math.round(e.nativeEvent.contentOffset.x / 400);
+              const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
               setViewingIndex(index);
-              setViewingImage(allChatImages[index]);
+              setViewingMedia(allChatMedia[index]);
             }}
-            renderItem={({ item: imgUrl }: any) => (
-              <ImageViewer url={imgUrl} onClose={() => setViewingImage(null)} />
+            renderItem={({ item: mediaUrl }: any) => (
+              <MediaSlide url={mediaUrl} />
             )}
-            style={{ flex: 1, width: 400 }}
+            style={{ flex: 1, width: SCREEN_WIDTH }}
           />
           <View style={styles.imageCounter}>
-            <Text style={{ color: '#fff', fontSize: 14 }}>{viewingIndex + 1} / {allChatImages.length}</Text>
+            <Text style={{ color: '#fff', fontSize: 14 }}>{viewingIndex + 1} / {allChatMedia.length}</Text>
           </View>
-          <TouchableOpacity style={styles.closeButton} onPress={() => setViewingImage(null)}>
+          <TouchableOpacity style={styles.closeButton} onPress={() => { setViewingMedia(null); setAllChatMedia([]); }}>
             <Text style={styles.closeButtonText}>✕</Text>
           </TouchableOpacity>
         </View>
@@ -642,7 +718,7 @@ const styles = StyleSheet.create({
   msgAvatar: { width: 28, height: 28, borderRadius: 14 },
   msgAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
   userCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 14, borderRadius: 14, marginBottom: 8 },
-  imageViewer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
+  mediaViewer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   imageCounter: { position: 'absolute', bottom: 48, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 6, borderRadius: 20 },
   closeButton: { position: 'absolute', top: 48, left: 16, width: 44, height: 44, borderRadius: 22, backgroundColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center' },
   closeButtonText: { color: '#fff', fontSize: 16 },

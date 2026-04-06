@@ -18,6 +18,8 @@ os.makedirs("avatars", exist_ok=True)
 app.mount("/avatars", StaticFiles(directory="avatars"), name="avatars")
 os.makedirs("chat_images", exist_ok=True)
 app.mount("/chat_images", StaticFiles(directory="chat_images"), name="chat_images")
+os.makedirs("chat_videos", exist_ok=True)
+app.mount("/chat_videos", StaticFiles(directory="chat_videos"), name="chat_videos")
 
 app.add_middleware(
     CORSMiddleware,

@@ -104,3 +104,17 @@ async def upload_image(file: UploadFile = File(...)):
     with open(filepath, "wb") as f:
         shutil.copyfileobj(file.file, f)
     return {"url": f"/chat_images/{filename}"}
+
+# Папка для видео
+VIDEO_DIR = "chat_videos"
+os.makedirs(VIDEO_DIR, exist_ok=True)
+
+# Загрузка видео в чат
+@router.post("/upload/video")
+async def upload_video(file: UploadFile = File(...)):
+    ext = file.filename.split(".")[-1]
+    filename = f"{os.urandom(8).hex()}.{ext}"
+    filepath = os.path.join(VIDEO_DIR, filename)
+    with open(filepath, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"url": f"/chat_videos/{filename}"}
