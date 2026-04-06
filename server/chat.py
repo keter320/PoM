@@ -86,3 +86,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         if username in active_connections:
             del active_connections[username]
         print(f"{username} отключился")
+
+import os
+from fastapi import UploadFile, File
+import shutil
+
+# Папка для картинок в чате
+IMAGE_DIR = "chat_images"
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+# Загрузка картинки в чат
+@router.post("/upload/image")
+async def upload_image(file: UploadFile = File(...)):
+    ext = file.filename.split(".")[-1]
+    filename = f"{os.urandom(8).hex()}.{ext}"  # случайное имя файла
+    filepath = os.path.join(IMAGE_DIR, filename)
+    with open(filepath, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"url": f"/chat_images/{filename}"}

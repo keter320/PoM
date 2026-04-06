@@ -1,12 +1,94 @@
 // Главный файл приложения PoM
 
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, FlatList, KeyboardAvoidingView, Platform, Image, BackHandler } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
+import * as MediaLibrary from 'expo-media-library';
+import * as FileSystem from 'expo-file-system';
+
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, { useSharedValue, useAnimatedStyle, withSpring, withTiming, runOnJS } from 'react-native-reanimated';
 
 const SERVER_URL = 'http://192.168.1.156:8000';
 const WS_URL = 'ws://192.168.1.156:8000';
+
+// Компонент просмотра одного фото с зумом и свайпом для закрытия
+function ImageViewer({ url, onClose }: { url: string, onClose: () => void }) {
+  const scale = useSharedValue(1);
+  const savedScale = useSharedValue(1);
+  const translateX = useSharedValue(0);
+  const translateY = useSharedValue(0);
+  const savedX = useSharedValue(0);
+  const savedY = useSharedValue(0);
+  const [detailMode, setDetailMode] = useState(false);
+
+  // Двойной тап — переключение режимов
+  const doubleTapGesture = Gesture.Tap()
+    .numberOfTaps(2)
+    .maxDuration(150)
+    .onEnd(() => {
+      if (!detailMode) {
+        runOnJS(setDetailMode)(true);
+        scale.value = withSpring(2);
+        savedScale.value = 2;
+      } else {
+        runOnJS(setDetailMode)(false);
+        scale.value = withSpring(1);
+        savedScale.value = 1;
+        translateX.value = withSpring(0);
+        translateY.value = withSpring(0);
+        savedX.value = 0;
+        savedY.value = 0;
+      }
+    });
+
+  // Пинч — только в детальном режиме
+  const pinchGesture = Gesture.Pinch()
+    .onUpdate((e) => {
+      scale.value = Math.max(1, Math.min(savedScale.value * e.scale, 5));
+    })
+    .onEnd(() => {
+      savedScale.value = scale.value;
+    });
+
+  // Перемещение в детальном режиме — свободное по X и Y
+  const panDetailGesture = Gesture.Pan()
+    .onUpdate((e) => {
+      translateX.value = savedX.value + e.translationX;
+      translateY.value = savedY.value + e.translationY;
+    })
+    .onEnd(() => {
+      savedX.value = translateX.value;
+      savedY.value = translateY.value;
+    });
+
+  // Жест для режима листания — отдаём горизонталь FlatList
+  const panListGesture = Gesture.Pan()
+    .activeOffsetX([-30, 30])
+    .failOffsetY([-20, 20])
+    .onUpdate(() => {})
+    .onEnd(() => {});
+
+  const detailComposed = Gesture.Simultaneous(pinchGesture, panDetailGesture, doubleTapGesture);
+  const listComposed = Gesture.Simultaneous(panListGesture, doubleTapGesture);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { scale: scale.value },
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+    ]
+  }));
+
+  return (
+    <GestureDetector gesture={detailMode ? detailComposed : listComposed}>
+      <Animated.View style={[{ width: 400, height: 600, alignItems: 'center', justifyContent: 'center' }, animatedStyle]}>
+        <Image source={{ uri: url }} style={{ width: 400, height: 300 }} resizeMode="contain" />
+      </Animated.View>
+    </GestureDetector>
+  );
+}
 
 export default function App() {
   const [screen, setScreen] = useState('login');
@@ -19,6 +101,9 @@ export default function App() {
   const [newDisplayName, setNewDisplayName] = useState('');
   const [myAvatar, setMyAvatar] = useState(null);
   const [chatAvatar, setChatAvatar] = useState(null);
+  const [viewingImage, setViewingImage] = useState(null);
+  const [viewingIndex, setViewingIndex] = useState(0);
+  const [allChatImages, setAllChatImages] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [addingContact, setAddingContact] = useState(false);
   const [newContact, setNewContact] = useState('');
@@ -61,6 +146,17 @@ export default function App() {
     }
     checkToken();
   }, []);
+
+  // Кнопка возврата на Android
+  useEffect(() => {
+    const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (viewingImage) { setViewingImage(null); return true; }
+      if (screen === 'chat') { setScreen('chats'); return true; }
+      if (screen === 'profile') { setScreen('chats'); return true; }
+      return false;
+    });
+    return () => handler.remove();
+  }, [viewingImage, screen]);
 
   // Подключаем WebSocket
   function connectWebSocket(tok: string, currentUsername: string) {
@@ -172,7 +268,7 @@ export default function App() {
     }
   }
 
-  // Добавить контакт по логину — сохраняем на сервере
+  // Добавить контакт
   async function addContact() {
     if (!newContact.trim()) return;
     try {
@@ -183,7 +279,7 @@ export default function App() {
       });
       const data = await response.json();
       if (response.ok) {
-        await loadContacts(myUsername); // перезагружаем список с сервера
+        await loadContacts(myUsername);
         setNewContact('');
         setAddingContact(false);
       } else {
@@ -203,6 +299,68 @@ export default function App() {
     }
     ws.current.send(JSON.stringify({ receiver: chatWith, content: chatInput }));
     setChatInput('');
+  }
+
+  // Выбор и отправка картинок
+  async function sendImage() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Ошибка', 'Нужно разрешение на доступ к галерее');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true,
+      quality: 0.8,
+    });
+    if (result.canceled) return;
+
+    const urls: string[] = [];
+    for (const asset of result.assets) {
+      const formData = new FormData();
+      formData.append('file', { uri: asset.uri, name: 'image.jpg', type: 'image/jpeg' } as any);
+      try {
+        const response = await fetch(`${SERVER_URL}/upload/image`, { method: 'POST', body: formData });
+        const data = await response.json();
+        if (response.ok) urls.push(`${SERVER_URL}${data.url}`);
+      } catch (e) {}
+    }
+
+    if (urls.length > 0) {
+      ws.current.send(JSON.stringify({
+        receiver: chatWith,
+        content: `[images]${urls.join('|')}`
+      }));
+    }
+  }
+
+  // Сохранить картинку в галерею
+  async function saveImage(url: string) {
+    try {
+      const permission = await MediaLibrary.requestPermissionsAsync();
+      if (!permission.granted) { Alert.alert('Ошибка', 'Нужно разрешение на сохранение'); return; }
+      const filename = `pom_${Date.now()}.jpg`;
+      const localUri = FileSystem.cacheDirectory + filename;
+      const download = await FileSystem.downloadAsync(url, localUri);
+      const asset = await MediaLibrary.createAssetAsync(download.uri);
+      await MediaLibrary.createAlbumAsync('PoM', asset, false);
+      Alert.alert('Готово', 'Фото сохранено в галерею!');
+    } catch (e) {
+      Alert.alert('Ошибка', String(e));
+    }
+  }
+
+  // Собрать все фото из чата для просмотрщика
+  function openImageViewer(url: string, msgs: any[]) {
+    const allImgs = msgs
+      .filter((m: any) => m.content?.startsWith('[images]') || m.content?.startsWith('[image]'))
+      .flatMap((m: any) => m.content.startsWith('[images]')
+        ? m.content.replace('[images]', '').split('|')
+        : [m.content.replace('[image]', '')]
+      );
+    setAllChatImages(allImgs);
+    setViewingIndex(allImgs.indexOf(url));
+    setViewingImage(url);
   }
 
   // Экран входа
@@ -247,14 +405,10 @@ export default function App() {
   if (screen === 'chats') return (
     <View style={styles.container}>
       <Text style={styles.title}>PoM</Text>
-
-      {/* Профиль */}
       <TouchableOpacity style={styles.profileCard} onPress={() => setScreen('profile')}>
         {myAvatar
           ? <Image source={{ uri: myAvatar }} style={styles.avatar} />
-          : <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text>
-            </View>
+          : <View style={styles.avatar}><Text style={styles.avatarText}>{myDisplayName?.[0]?.toUpperCase() || '?'}</Text></View>
         }
         <View>
           <Text style={styles.profileName}>{myDisplayName}</Text>
@@ -263,15 +417,12 @@ export default function App() {
         <Text style={[styles.link, { marginLeft: 'auto' }]}>✎</Text>
       </TouchableOpacity>
 
-      {/* Список контактов */}
       <FlatList
         data={contacts}
         keyExtractor={(item: any) => item.username}
         style={{ width: '100%' }}
         ListEmptyComponent={
-          <Text style={[styles.profileUsername, { textAlign: 'center', marginTop: 32 }]}>
-            Добавь первый чат →
-          </Text>
+          <Text style={[styles.profileUsername, { textAlign: 'center', marginTop: 32 }]}>Добавь первый чат →</Text>
         }
         renderItem={({ item }: any) => (
           <TouchableOpacity style={styles.userCard} onPress={async () => {
@@ -288,9 +439,7 @@ export default function App() {
           }}>
             {item.avatar
               ? <Image source={{ uri: `${SERVER_URL}${item.avatar}` }} style={styles.avatar} />
-              : <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>{item.display_name?.[0]?.toUpperCase() || '?'}</Text>
-                </View>
+              : <View style={styles.avatar}><Text style={styles.avatarText}>{item.display_name?.[0]?.toUpperCase() || '?'}</Text></View>
             }
             <View>
               <Text style={styles.profileName}>{item.display_name}</Text>
@@ -300,13 +449,11 @@ export default function App() {
         )}
       />
 
-      {/* Поле добавления контакта */}
       {addingContact && (
         <View style={{ width: '100%', flexDirection: 'row', gap: 8, marginTop: 8 }}>
           <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]}
             placeholder="Логин пользователя" placeholderTextColor="#888"
-            value={newContact} onChangeText={setNewContact} autoCapitalize="none"
-            autoFocus />
+            value={newContact} onChangeText={setNewContact} autoCapitalize="none" autoFocus />
           <TouchableOpacity style={styles.sendButton} onPress={addContact}>
             <Text style={styles.buttonText}>+</Text>
           </TouchableOpacity>
@@ -317,14 +464,9 @@ export default function App() {
         </View>
       )}
 
-      {/* Кнопки внизу */}
       <View style={{ flexDirection: 'row', width: '100%', justifyContent: 'space-between', marginTop: 16 }}>
-        <TouchableOpacity onPress={logout}>
-          <Text style={styles.link}>Выйти</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setAddingContact(true)}>
-          <Text style={styles.link}>+ Новый чат</Text>
-        </TouchableOpacity>
+        <TouchableOpacity onPress={logout}><Text style={styles.link}>Выйти</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setAddingContact(true)}><Text style={styles.link}>+ Новый чат</Text></TouchableOpacity>
       </View>
     </View>
   );
@@ -379,6 +521,7 @@ export default function App() {
         </TouchableOpacity>
         <Text style={styles.chatTitle}>{chatWith}</Text>
       </View>
+
       <FlatList
         ref={flatListRef}
         data={messages.filter((m: any) =>
@@ -397,19 +540,74 @@ export default function App() {
                   </View>
             )}
             <View style={[styles.message, item.sender === myUsername ? styles.myMessage : styles.theirMessage]}>
-              <Text style={styles.messageText}>{item.content}</Text>
+              {item.content?.startsWith('[images]') ? (
+                (() => {
+                  const urls = item.content.replace('[images]', '').split('|');
+                  return (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, maxWidth: 220 }}>
+                      {urls.map((url: string, i: number) => (
+                        <TouchableOpacity key={i} onPress={() => openImageViewer(url, messages)}>
+                          <Image source={{ uri: url }}
+                            style={{ width: urls.length === 1 ? 200 : 106, height: urls.length === 1 ? 200 : 106, borderRadius: 8 }}
+                            resizeMode="cover" />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  );
+                })()
+              ) : item.content?.startsWith('[image]') ? (
+                <TouchableOpacity onPress={() => openImageViewer(item.content.replace('[image]', ''), messages)}>
+                  <Image source={{ uri: item.content.replace('[image]', '') }}
+                    style={{ width: 200, height: 200, borderRadius: 8 }} resizeMode="cover" />
+                </TouchableOpacity>
+              ) : (
+                <Text style={styles.messageText}>{item.content}</Text>
+              )}
             </View>
           </View>
         )}
         style={styles.messageList}
       />
+
       <View style={styles.inputRow}>
+        <TouchableOpacity style={[styles.sendButton, { backgroundColor: '#2a2a2a' }]} onPress={sendImage}>
+          <Text style={styles.buttonText}>🖼</Text>
+        </TouchableOpacity>
         <TextInput style={styles.chatInput} placeholder="Сообщение..." placeholderTextColor="#888"
           value={chatInput} onChangeText={setChatInput} />
         <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
           <Text style={styles.buttonText}>→</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Просмотрщик фото */}
+      {viewingImage && (
+        <View style={styles.imageViewer}>
+          <FlatList
+            data={allChatImages}
+            horizontal
+            pagingEnabled
+            initialScrollIndex={viewingIndex}
+            getItemLayout={(_, index) => ({ length: 400, offset: 400 * index, index })}
+            keyExtractor={(_, i) => i.toString()}
+            onMomentumScrollEnd={(e) => {
+              const index = Math.round(e.nativeEvent.contentOffset.x / 400);
+              setViewingIndex(index);
+              setViewingImage(allChatImages[index]);
+            }}
+            renderItem={({ item: imgUrl }: any) => (
+              <ImageViewer url={imgUrl} onClose={() => setViewingImage(null)} />
+            )}
+            style={{ flex: 1, width: 400 }}
+          />
+          <View style={styles.imageCounter}>
+            <Text style={{ color: '#fff', fontSize: 14 }}>{viewingIndex + 1} / {allChatImages.length}</Text>
+          </View>
+          <TouchableOpacity style={styles.closeButton} onPress={() => setViewingImage(null)}>
+            <Text style={styles.closeButtonText}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -444,4 +642,8 @@ const styles = StyleSheet.create({
   msgAvatar: { width: 28, height: 28, borderRadius: 14 },
   msgAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#6c63ff', alignItems: 'center', justifyContent: 'center' },
   userCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', backgroundColor: '#1a1a1a', padding: 14, borderRadius: 14, marginBottom: 8 },
+  imageViewer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
+  imageCounter: { position: 'absolute', bottom: 48, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 16, paddingVertical: 6, borderRadius: 20 },
+  closeButton: { position: 'absolute', top: 48, left: 16, width: 44, height: 44, borderRadius: 22, backgroundColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center' },
+  closeButtonText: { color: '#fff', fontSize: 16 },
 });
